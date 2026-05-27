@@ -1,0 +1,22 @@
+# Local/CPU dependencies
+# Note: (a) This is for local CPU inference + data collection + serving.
+# Note: (b) For CPU-only PyTorch install, run the pip command with the CPU index URL.
+# pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+mediapipe>=0.10.9
+opencv-python>=4.9.0
+torch>=2.2.0
+torchvision>=0.17.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+gradio>=4.26.0
+mlflow>=2.12.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+tqdm>=4.66.0

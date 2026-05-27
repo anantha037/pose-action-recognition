@@ -1,0 +1,29 @@
+# Standard Python ignores
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+.venv/
+
+# ML artifact ignores
+*.pt
+*.pth
+*.ckpt
+mlruns/
+mlartifacts/
+
+# Data ignores
+data/sequences/*.npy
+
+# OS ignores
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# IDE ignores
+.vscode/
+.idea/
+
+# Docker ignores
+*.log
