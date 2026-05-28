@@ -14,7 +14,7 @@ mlruns/
 mlartifacts/
 
 # Data ignores
-data/sequences/*.npy
+data/sequences/
 data/raw_videos/
 
 # OS ignores
@@ -28,3 +28,4 @@ desktop.ini
 
 # Docker ignores
 *.log
+*.task
