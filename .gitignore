@@ -15,6 +15,7 @@ mlartifacts/
 
 # Data ignores
 data/sequences/*.npy
+data/raw_videos/
 
 # OS ignores
 Thumbs.db
