@@ -402,7 +402,9 @@ def train(config: TrainingConfig) -> None:
                     'epoch': epoch,
                     'val_accuracy': best_val_acc,
                     'label_map': label_map,
-                    'config': asdict(config)
+                    'config': asdict(config),
+                    'mean': loaders['mean'],
+                    'std': loaders['std']
                 }, best_model_path)
             
             # Early stopping check
