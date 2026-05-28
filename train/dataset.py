@@ -236,7 +236,9 @@ def get_data_loaders(
         'val': val_loader,
         'test': test_loader,
         'label_map': full_dataset.label_map,
-        'class_weights': full_dataset.class_weights
+        'class_weights': full_dataset.class_weights,
+        'mean': full_dataset.mean,
+        'std': full_dataset.std
     }
 
 
