@@ -7,13 +7,22 @@ as data_collector.py but runs autonomously over a directory of videos.
 """
 
 import argparse
+import os
+import urllib.request
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 import numpy as np
 import cv2
 import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 from tqdm import tqdm
 
+POSE_CONNECTIONS = [(0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8), 
+                    (9, 10), (11, 12), (11, 13), (13, 15), (15, 17), (15, 19), (15, 21), 
+                    (17, 19), (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20), 
+                    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26), (25, 27), (26, 28), 
+                    (27, 29), (28, 30), (29, 31), (30, 32), (27, 31), (28, 32)]
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -33,6 +42,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show_preview", action="store_true", 
                         help="Show an OpenCV window previewing the skeleton overlay frame by frame")
     return parser.parse_args()
+
+
+def get_model_path() -> str:
+    """Download the MediaPipe Pose Landmarker model if it doesn't exist."""
+    model_path = "pose_landmarker_lite.task"
+    if not os.path.exists(model_path):
+        print(f"Downloading MediaPipe model to {model_path}...")
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+        urllib.request.urlretrieve(url, model_path)
+    return model_path
 
 
 def get_next_sequence_index(action_output_dir: Path) -> int:
@@ -55,48 +74,65 @@ def get_next_sequence_index(action_output_dir: Path) -> int:
     return max_idx + 1
 
 
-def extract_pose_landmarks(results: tuple) -> np.ndarray:
+def extract_pose_landmarks(results: Any) -> np.ndarray:
     """
-    Extracts pose landmarks from a MediaPipe results object.
+    Extracts pose landmarks from a MediaPipe tasks results object.
     
     Returns a numpy array of shape (132,) containing 33 landmarks * 4 values 
     (x, y, z, visibility). If no pose is detected, returns a zero array of shape (132,).
     """
-    if results.pose_landmarks:
+    if results.pose_landmarks and len(results.pose_landmarks) > 0:
         # Flatten the landmarks into a single array
         landmarks = []
-        for lm in results.pose_landmarks.landmark:
+        for lm in results.pose_landmarks[0]:
             landmarks.extend([lm.x, lm.y, lm.z, lm.visibility])
         return np.array(landmarks, dtype=np.float32)
     else:
         return np.zeros((132,), dtype=np.float32)
 
 
+def draw_manual_landmarks(frame: np.ndarray, results: Any) -> None:
+    """Draw landmarks using cv2 since mp.solutions is unavailable in Tasks API."""
+    if not results.pose_landmarks or len(results.pose_landmarks) == 0:
+        return
+        
+    h, w, _ = frame.shape
+    pose = results.pose_landmarks[0]
+    
+    # Draw connections
+    for connection in POSE_CONNECTIONS:
+        start_idx, end_idx = connection
+        lm1 = pose[start_idx]
+        lm2 = pose[end_idx]
+        # Only draw if visibility is reasonable
+        if lm1.visibility > 0.1 and lm2.visibility > 0.1:
+            pt1 = (int(lm1.x * w), int(lm1.y * h))
+            pt2 = (int(lm2.x * w), int(lm2.y * h))
+            cv2.line(frame, pt1, pt2, (245, 117, 66), 2)
+            
+    # Draw points
+    for lm in pose:
+        if lm.visibility > 0.1:
+            pt = (int(lm.x * w), int(lm.y * h))
+            cv2.circle(frame, pt, 2, (245, 66, 230), -1)
+
+
 def process_video(
     video_path: Path,
     action: str,
     output_dir: Path,
-    pose_estimator: mp.solutions.pose.Pose,
+    pose_estimator: Any,
     sequence_length: int,
     overlap: int,
     show_preview: bool,
-    global_seq_idx: int
-) -> Tuple[int, int, int]:
+    global_seq_idx: int,
+    global_timestamp_ms: int
+) -> Tuple[int, int, int, int]:
     """
     Process a single video file, extract sequences, and save them.
     
-    Args:
-        video_path: Path to the video file.
-        action: The action label for the video.
-        output_dir: The root output directory.
-        pose_estimator: Initialized MediaPipe Pose object.
-        sequence_length: Number of frames per sequence.
-        overlap: Overlap between sequences.
-        show_preview: Whether to show OpenCV preview window.
-        global_seq_idx: The starting index to use for saving .npy files.
-        
     Returns:
-        A tuple of (sequences_extracted, skipped_sequences, next_global_idx).
+        A tuple of (sequences_extracted, skipped_sequences, next_global_idx, next_global_timestamp_ms).
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -107,15 +143,15 @@ def process_video(
     fps = cap.get(cv2.CAP_PROP_FPS)
     duration = total_frames_in_video / fps if fps > 0 else 0.0
     
+    if fps <= 0:
+        fps = 30.0  # Fallback
+    
     relative_path = f"{action}/{video_path.name}"
     print(f"Processing: {relative_path}")
     print(f"  Total frames: {total_frames_in_video} | FPS: {fps:.1f} | Duration: {duration:.1f}s")
     
     action_output_dir = output_dir / action
     action_output_dir.mkdir(parents=True, exist_ok=True)
-    
-    mp_drawing = mp.solutions.drawing_utils
-    mp_pose = mp.solutions.pose
     
     buffer: List[np.ndarray] = []
     sequences_extracted = 0
@@ -132,12 +168,13 @@ def process_video(
             if not success:
                 break
                 
-            # Process frame with MediaPipe
-            # MediaPipe expects RGB format
+            # Process frame with MediaPipe Tasks API
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_rgb.flags.writeable = False
-            results = pose_estimator.process(frame_rgb)
-            frame_rgb.flags.writeable = True
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            
+            # Use timestamp to maintain tracking across frames
+            global_timestamp_ms += max(1, int(1000 / fps))
+            results = pose_estimator.detect_for_video(mp_image, global_timestamp_ms)
             
             # Extract landmarks
             landmarks = extract_pose_landmarks(results)
@@ -169,14 +206,7 @@ def process_video(
                 
             # Show preview
             if show_preview:
-                if results.pose_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame,
-                        results.pose_landmarks,
-                        mp_pose.POSE_CONNECTIONS,
-                        mp_drawing.DrawingSpec(color=(245, 117, 66), thickness=2, circle_radius=2),
-                        mp_drawing.DrawingSpec(color=(245, 66, 230), thickness=2, circle_radius=2)
-                    )
+                draw_manual_landmarks(frame, results)
                 
                 cv2.putText(frame, f"Action: {action}", (10, 30), 
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
@@ -196,7 +226,7 @@ def process_video(
             cv2.destroyAllWindows()
             
     print(f"  Sequences extracted: {sequences_extracted} | Skipped (low pose detection): {skipped_sequences}")
-    return sequences_extracted, skipped_sequences, current_global_idx
+    return sequences_extracted, skipped_sequences, current_global_idx, global_timestamp_ms
 
 
 def main() -> None:
@@ -218,18 +248,25 @@ def main() -> None:
         
     video_extensions = {".mp4", ".avi", ".mov"}
     
-    # Initialize MediaPipe Pose once
-    mp_pose = mp.solutions.pose
-    pose_estimator = mp_pose.Pose(
-        min_detection_confidence=args.min_detection_confidence,
+    # Initialize MediaPipe Pose using the new Tasks API
+    model_path = get_model_path()
+    
+    base_options = python.BaseOptions(model_asset_path=model_path)
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO,
+        min_pose_detection_confidence=args.min_detection_confidence,
+        min_pose_presence_confidence=0.5,
         min_tracking_confidence=args.min_tracking_confidence,
-        model_complexity=1
     )
+    
+    pose_estimator = vision.PoseLandmarker.create_from_options(options)
     
     # Summary stats
     summary: Dict[str, Dict[str, int]] = {action: {"videos": 0, "sequences": 0} for action in actions}
     total_videos = 0
     total_sequences = 0
+    global_timestamp_ms = 0
     
     try:
         for action in actions:
@@ -253,7 +290,7 @@ def main() -> None:
             global_seq_idx = get_next_sequence_index(action_output_dir)
             
             for video_path in videos:
-                extracted, skipped, global_seq_idx = process_video(
+                extracted, skipped, global_seq_idx, global_timestamp_ms = process_video(
                     video_path=video_path,
                     action=action,
                     output_dir=output_dir,
@@ -261,7 +298,8 @@ def main() -> None:
                     sequence_length=args.sequence_length,
                     overlap=args.overlap,
                     show_preview=args.show_preview,
-                    global_seq_idx=global_seq_idx
+                    global_seq_idx=global_seq_idx,
+                    global_timestamp_ms=global_timestamp_ms
                 )
                 summary[action]["sequences"] += extracted
                 total_sequences += extracted
