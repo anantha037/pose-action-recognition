@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import tempfile
 import collections
 from typing import Tuple, Dict, Any, List
@@ -11,8 +12,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 import mediapipe as mp
-from mediapipe.python.solutions import pose as mp_pose
-from mediapipe.python.solutions import drawing_utils as mp_drawing
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision
 
 from app.inference import ActionClassifier
 
@@ -58,17 +59,47 @@ ACTION_COLORS_HEX = {
 }
 
 
+POSE_CONNECTIONS = [(0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8), 
+                    (9, 10), (11, 12), (11, 13), (13, 15), (15, 17), (15, 19), (15, 21), 
+                    (17, 19), (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20), 
+                    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26), (25, 27), (26, 28), 
+                    (27, 29), (28, 30), (29, 31), (30, 32), (27, 31), (28, 32)]
+
 def extract_landmarks(results: Any) -> List[float]:
     """
     Extracts a flat list of 132 features (x, y, z, visibility for 33 landmarks)
     from MediaPipe pose results.
     """
-    if results.pose_landmarks and len(results.pose_landmarks.landmark) > 0:
+    if hasattr(results, 'pose_landmarks') and results.pose_landmarks and len(results.pose_landmarks) > 0:
         landmarks = []
-        for lm in results.pose_landmarks.landmark:
+        for lm in results.pose_landmarks[0]:
             landmarks.extend([lm.x, lm.y, lm.z, lm.visibility])
         return landmarks
     return [0.0] * 132
+
+def draw_manual_landmarks(frame: np.ndarray, results: Any) -> None:
+    """Draw landmarks manually using cv2."""
+    if not hasattr(results, 'pose_landmarks') or not results.pose_landmarks or len(results.pose_landmarks) == 0:
+        return
+        
+    h, w, _ = frame.shape
+    pose = results.pose_landmarks[0]
+    
+    # Draw connections
+    for connection in POSE_CONNECTIONS:
+        start_idx, end_idx = connection
+        lm1 = pose[start_idx]
+        lm2 = pose[end_idx]
+        if lm1.visibility > 0.1 and lm2.visibility > 0.1:
+            pt1 = (int(lm1.x * w), int(lm1.y * h))
+            pt2 = (int(lm2.x * w), int(lm2.y * h))
+            cv2.line(frame, pt1, pt2, (255, 255, 255), 1)
+            
+    # Draw points
+    for lm in pose:
+        if lm.visibility > 0.1:
+            pt = (int(lm.x * w), int(lm.y * h))
+            cv2.circle(frame, pt, 2, (255, 255, 255), -1)
 
 def draw_overlay(
     frame: np.ndarray, 
@@ -179,11 +210,22 @@ def process_video(
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
     
-    pose = mp_pose.Pose(
-        model_complexity=0, 
-        min_detection_confidence=0.5, 
-        min_tracking_confidence=0.5
+    model_path = "pose_landmarker_lite.task"
+    if not os.path.exists(model_path):
+        import urllib.request
+        print(f"Downloading MediaPipe model to {model_path}...")
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+        urllib.request.urlretrieve(url, model_path)
+        
+    base_options = mp_python.BaseOptions(model_asset_path=model_path)
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
     )
+    pose = vision.PoseLandmarker.create_from_options(options)
     
     buffer = collections.deque(maxlen=30)
     
@@ -210,19 +252,17 @@ def process_video(
                 
             # Convert BGR to RGB for MediaPipe
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(rgb_frame)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            
+            timestamp_ms = int((frames_processed * 1000) / fps)
+            results = pose.detect_for_video(mp_image, timestamp_ms)
             
             # Extract features
             features = extract_landmarks(results)
             buffer.append(features)
             
             # Draw MediaPipe skeleton
-            if results.pose_landmarks:
-                mp_drawing.draw_landmarks(
-                    frame, 
-                    results.pose_landmarks, 
-                    mp_pose.POSE_CONNECTIONS
-                )
+            draw_manual_landmarks(frame, results)
                 
             # Run prediction every 'stride' frames if buffer is full
             if len(buffer) == 30 and (frames_processed % stride) == 0:
@@ -281,7 +321,7 @@ def process_video(
 
 def build_app() -> gr.Blocks:
     """Builds and configures the Gradio user interface."""
-    with gr.Blocks(theme=gr.themes.Soft(), title="Pose Action Recognition") as demo:
+    with gr.Blocks(title="Pose Action Recognition") as demo:
         
         # Display warning if model is missing
         if classifier is None:
@@ -327,6 +367,13 @@ def build_app() -> gr.Blocks:
                 except Exception as e:
                     print(f"Error extracting model info: {e}")
                 
+                # Gradio requires all dict keys to be strings
+                try:
+                    model_info = json.loads(json.dumps(model_info))
+                except Exception:
+                    # Fallback string coercion if json.dumps fails
+                    model_info = {str(k): str(v) for k, v in model_info.items()}
+                
                 gr.JSON(value=model_info, label="Model Info")
                 gr.Dataframe(value=classes, headers=["Index", "Action"], label="Supported Classes")
                 
@@ -351,5 +398,6 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
-        show_error=True
+        show_error=True,
+        theme=gr.themes.Soft()
     )
