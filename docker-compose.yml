@@ -14,7 +14,7 @@ services:
       - ./models:/app/models
     environment:
       # Set the path to the best model to use
-      - MODEL_PATH=/app/models/best_model.pt
+      - MODEL_PATH=/app/models/best_lstm.pt
 
   # The mlflow service runs the MLflow tracking server.
   # Use this service to view training metrics, parameters, and models logged during training.
