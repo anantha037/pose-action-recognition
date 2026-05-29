@@ -10,10 +10,13 @@ import time
 import argparse
 import threading
 import collections
-import requests
 import os
+import sys
 import urllib.request
 from dataclasses import dataclass, field
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from app.inference import ActionClassifier
 from typing import Dict, List, Any, Tuple
 
 import numpy as np
@@ -43,41 +46,34 @@ class DemoState:
     latest_action: str = "Waiting..."
     latest_confidence: float = 0.0
     latest_probabilities: Dict[str, float] = field(default_factory=dict)
-    api_offline: bool = False
+    latency_ms: float = 0.0
     is_predicting: bool = False
     total_predictions: int = 0
 
 
-def send_prediction_request(state: DemoState, sequence: List[List[float]], api_url: str) -> None:
-    """
-    Sends a sequence to the FastAPI prediction endpoint in a separate thread.
-    
-    Args:
-        state (DemoState): The mutable application state.
-        sequence (List[List[float]]): The 30-frame sequence of 132 features.
-        api_url (str): URL of the FastAPI prediction endpoint.
-    """
+def run_inference(
+    buffer: list,
+    classifier: ActionClassifier,
+    state: DemoState,
+    lock: threading.Lock
+) -> None:
+    """Runs direct inference in a background thread using ActionClassifier."""
     try:
-        payload = {
-            "sequence": sequence,
-            "return_probabilities": True
-        }
-        # Use a short timeout so we don't hang threads forever
-        response = requests.post(f"{api_url.rstrip('/')}/predict", json=payload, timeout=2.0)
-        
-        if response.status_code == 200:
-            data = response.json()
-            state.latest_action = data.get("action", "Unknown")
-            state.latest_confidence = data.get("confidence", 0.0)
-            state.latest_probabilities = data.get("probabilities", {})
-            state.api_offline = False
+        sequence = np.array(buffer)  # shape (30, 132)
+        result = classifier.predict(sequence)
+        with lock:
+            state.latest_action = result.get('action', 'Unknown')
+            state.latest_confidence = result.get('confidence', 0.0)
+            state.latest_probabilities = result.get('probabilities', {})
+            state.latency_ms = result.get('latency_ms', 0.0)
             state.total_predictions += 1
-        else:
-            state.api_offline = True
-    except requests.RequestException:
-        state.api_offline = True
+    except Exception as e:
+        with lock:
+            state.latest_action = 'Error'
+            state.latest_confidence = 0.0
     finally:
-        state.is_predicting = False
+        with lock:
+            state.is_predicting = False
 
 
 def extract_landmarks(results: Any) -> List[float]:
@@ -135,7 +131,7 @@ def get_action_color(action: str) -> Tuple[int, int, int]:
 def main() -> None:
     """Main execution loop for the real-time demo."""
     parser = argparse.ArgumentParser(description="Real-time Pose Action Recognition Demo")
-    parser.add_argument("--api_url", type=str, default="http://localhost:8000", help="FastAPI server URL")
+    parser.add_argument("--model_path", type=str, default="models/best_lstm.pt", help="Path to trained model checkpoint")
     parser.add_argument("--camera_index", type=int, default=0, help="Webcam index")
     parser.add_argument("--sequence_length", type=int, default=30, help="Frames per sequence")
     parser.add_argument("--stride", type=int, default=15, help="Frames to slide forward after each prediction")
@@ -145,6 +141,7 @@ def main() -> None:
     args = parser.parse_args()
 
     state = DemoState()
+    state_lock = threading.Lock()
     buffer = collections.deque(maxlen=args.sequence_length)
     frames_since_last_prediction = 0
     
@@ -158,8 +155,10 @@ def main() -> None:
         return
     
     print(f"\nStarting real-time demo on camera {args.camera_index}")
-    print(f"Connecting to API at {args.api_url}")
+    print(f"Loading model from {args.model_path}")
     print("Press 'Q' to quit.\n")
+
+    classifier = ActionClassifier(model_path=args.model_path, device='cpu')
 
     # Initialize MediaPipe Pose with modern Tasks API (avoids 3.13 broken legacy solutions)
     model_path = get_model_path()
@@ -211,10 +210,9 @@ def main() -> None:
                 frames_since_last_prediction = 0
                 
                 # We copy the buffer to avoid mutation during thread execution
-                seq_copy = list(buffer)
                 threading.Thread(
-                    target=send_prediction_request, 
-                    args=(state, seq_copy, args.api_url), 
+                    target=run_inference, 
+                    args=(list(buffer), classifier, state, state_lock), 
                     daemon=True
                 ).start()
 
@@ -230,8 +228,8 @@ def main() -> None:
             cv2.rectangle(overlay, (0, 0), (w, 80), (30, 30, 30), -1)
             cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
             
-            if state.api_offline:
-                display_text = "API Offline"
+            if state.latest_action == 'Error':
+                display_text = "ERROR"
                 text_color = (0, 0, 255)  # Red
                 conf_text = ""
             else:
