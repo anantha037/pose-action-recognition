@@ -352,7 +352,7 @@ def train(config: TrainingConfig) -> None:
         criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
         optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', patience=config.scheduler_patience, factor=0.5, verbose=True
+            optimizer, mode='max', patience=config.scheduler_patience, factor=0.5,
         )
         scaler = torch.cuda.amp.GradScaler()
         early_stopping = EarlyStopping(patience=config.early_stopping_patience, mode='max')
