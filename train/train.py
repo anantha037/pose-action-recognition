@@ -306,7 +306,8 @@ def train(config: TrainingConfig) -> None:
     set_seed(int(config.seed))
     
     # MLflow setup
-    mlflow.set_experiment(config.mlflow_experiment)
+    from mlflow_utils import setup_mlflow
+    setup_mlflow(experiment_name=config.mlflow_experiment)
     
     with mlflow.start_run():
         mlflow.log_params(asdict(config))
