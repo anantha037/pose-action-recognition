@@ -51,7 +51,7 @@ class TrainingConfig:
     mlflow_experiment: str = 'pose-action-recognition'
     early_stopping_patience: int = 10
     scheduler_patience: int = 5
-    actions: List[str] = field(default_factory=lambda: ['idle', 'jumping_jack', 'push_up', 'squat', 'wave'])
+    actions: List[str] = field(default_factory=lambda: ['idle', 'jumping_jack', 'push_up', 'sitting', 'squat', 'wave'])
 
 
 def set_seed(seed: int) -> None:

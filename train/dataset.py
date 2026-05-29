@@ -70,7 +70,7 @@ class ActionSequenceDataset(Dataset):
             augment (bool): Whether to apply data augmentation (noise, masking, flipping).
         """
         if actions is None:
-            actions = ['idle', 'wave', 'squat', 'push_up', 'jumping_jack']
+            actions = ['idle', 'wave', 'sitting','squat','push_up', 'jumping_jack']
             
         self.data_dir = data_dir
         self.actions = sorted(actions)  # Always sort alphabetically for reproducibility
